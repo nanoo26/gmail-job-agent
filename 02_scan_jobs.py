@@ -231,8 +231,17 @@ def _extract_alljobs_job_id_from_value(value: str) -> str:
     return m.group(1) if m else ""
 
 
+def _normalize_alljobs_url_value(url: str) -> str:
+    cleaned = unescape((url or "").strip())
+    # Some emails store query delimiters as HTML entities.
+    for _ in range(2):
+        if "&amp;" in cleaned:
+            cleaned = cleaned.replace("&amp;", "&")
+    return cleaned
+
+
 def _extract_alljobs_job_id(url: str) -> str:
-    cleaned = unescape((url or '').strip())
+    cleaned = _normalize_alljobs_url_value(url)
     if not cleaned:
         return ""
 
@@ -240,10 +249,19 @@ def _extract_alljobs_job_id(url: str) -> str:
         parsed = urlparse(cleaned)
         params = parse_qs(parsed.query, keep_blank_values=True)
         for key, values in params.items():
-            if key.lower() == 'jobid' and values:
+            key_norm = key.lower().replace("amp;", "")
+            if key_norm == 'jobid' and values:
                 jid = _extract_alljobs_job_id_from_value(values[0])
                 if jid:
                     return jid
+            if values:
+                for raw_val in values:
+                    raw_decoded = unquote(str(raw_val))
+                    m_nested = re.search(r'jobid=([^&#]+)', raw_decoded, re.IGNORECASE)
+                    if m_nested:
+                        jid = _extract_alljobs_job_id_from_value(m_nested.group(1))
+                        if jid:
+                            return jid
     except Exception:
         pass
 
@@ -257,7 +275,7 @@ def _extract_alljobs_job_id(url: str) -> str:
 
 
 def resolve_job_url(raw_link: str) -> tuple[str, str]:
-    raw = unescape((raw_link or '').strip())
+    raw = _normalize_alljobs_url_value(raw_link)
     if not raw:
         return "", "unresolved"
 
@@ -267,6 +285,9 @@ def resolve_job_url(raw_link: str) -> tuple[str, str]:
         if job_id:
             direct = f"https://www.alljobs.co.il/Search/UploadSingle.aspx?JobID={job_id}"
             return direct, "resolved"
+        if '/user/mailsredirect/' in lower or lower.rstrip('/') in ("https://www.alljobs.co.il", "http://www.alljobs.co.il"):
+            # Better UX than opening the homepage when redirect token is stale.
+            return "https://www.alljobs.co.il/User/JobsFeed/", "resolved"
         if _url_fingerprint(raw):
             return raw, "resolved"
         return raw, "unresolved"
@@ -590,6 +611,43 @@ def _load_existing_rows_and_ids(path: str) -> tuple[list[dict], set[str]]:
     return rows, ids
 
 
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return int(float(value or 0))
+    except Exception:
+        return default
+
+
+def _claude_unique_key(row: dict) -> str:
+    for field in ("job_id", "gmail_msg_id"):
+        value = str(row.get(field, "") or "").strip()
+        if value:
+            return f"{field}:{value}"
+    title = str(row.get("job_title", "") or row.get("subject", "")).strip().lower()
+    if title:
+        return f"title:{title[:160]}"
+    return f"fallback:{str(row.get('link', '')).strip()}"
+
+
+def _top_claude_rows_unique(rows: list[dict], limit: int = 5) -> list[dict]:
+    ranked = sorted(
+        rows,
+        key=lambda r: (_safe_int(r.get("claude_match_pct", 0)), _safe_int(r.get("final_score", 0))),
+        reverse=True,
+    )
+    seen: set[str] = set()
+    top_rows: list[dict] = []
+    for row in ranked:
+        key = _claude_unique_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        top_rows.append(row)
+        if len(top_rows) >= limit:
+            break
+    return top_rows
+
+
 
 def main(days_back=90, max_results=120, only_inbox=True):
     out_file = "job_emails.csv"
@@ -643,6 +701,7 @@ def main(days_back=90, max_results=120, only_inbox=True):
     scanned_emails = 0
     skipped_existing = 0
     _claude_calls = 0
+    claude_analyzed_rows: list[dict] = []
 
     for i, m in enumerate(msgs):
         msg_id_hint = (m.get("id") or "").strip()
@@ -749,6 +808,9 @@ def main(days_back=90, max_results=120, only_inbox=True):
             "claude_raw_response": claude_raw_resp,
         })
 
+        if _run_claude:
+            claude_analyzed_rows.append(new_rows[-1])
+
         if (
             _CLAUDE_ENABLED
             and _CLAUDE_DEBUG_STOP_EARLY
@@ -805,10 +867,74 @@ def main(days_back=90, max_results=120, only_inbox=True):
     print(f"\n✅ Exported: {out_file}  ({len(rows)} rows)\n")
     print(f"[scan] scanned {scanned_emails} emails, skipped {skipped_existing} existing, exported {len(rows)} rows")
 
+    claude_calls_attempted = len(claude_analyzed_rows)
+    claude_success_count = sum(1 for r in claude_analyzed_rows if not str(r.get("claude_error", "")).strip())
+    claude_error_count = claude_calls_attempted - claude_success_count
+    claude_positive_count = sum(1 for r in claude_analyzed_rows if _safe_int(r.get("claude_match_pct", 0)) > 0)
+    claude_match_values = [_safe_int(r.get("claude_match_pct", 0)) for r in claude_analyzed_rows]
+    claude_avg_match_pct = round(sum(claude_match_values) / len(claude_match_values), 2) if claude_match_values else 0
+    claude_max_match_pct = max(claude_match_values) if claude_match_values else 0
+
+    # Dataset snapshot (all exported rows), useful when incremental run had 0 fresh Claude calls.
+    dataset_match_values = [_safe_int(r.get("claude_match_pct", 0)) for r in rows]
+    dataset_positive_count = sum(1 for v in dataset_match_values if v > 0)
+    dataset_avg_match_pct = round(sum(dataset_match_values) / len(dataset_match_values), 2) if dataset_match_values else 0
+    dataset_max_match_pct = max(dataset_match_values) if dataset_match_values else 0
+    top_5_claude_rows = _top_claude_rows_unique(rows, limit=5)
+
     if _CLAUDE_ENABLED:
         print("🏆 TOP 5 לפי התאמת Claude:\n")
-        for r in rows[:5]:
-            print(f"  {r['claude_match_pct']}% | {r['job_title'] or r['subject'][:55]}")
+        if top_5_claude_rows:
+            for r in top_5_claude_rows:
+                print(f"  {_safe_int(r.get('claude_match_pct', 0))}% | {(r.get('job_title') or r.get('subject', ''))[:55]}")
+        else:
+            print("  אין שורות Claude להצגה")
+
+    print("[claude-summary] "
+          f"scanned_emails={scanned_emails} "
+          f"skipped_existing={skipped_existing} "
+          f"total_exported_rows={len(rows)} "
+          f"claude_calls_attempted={claude_calls_attempted} "
+          f"claude_success_count={claude_success_count} "
+          f"claude_error_count={claude_error_count} "
+          f"claude_positive_count={claude_positive_count} "
+          f"claude_avg_match_pct={claude_avg_match_pct} "
+          f"claude_max_match_pct={claude_max_match_pct} "
+          f"dataset_positive_count={dataset_positive_count} "
+          f"dataset_avg_match_pct={dataset_avg_match_pct} "
+          f"dataset_max_match_pct={dataset_max_match_pct}")
+
+    summary_payload = {
+        "run_timestamp": datetime.now(timezone.utc).isoformat(),
+        "scanned_emails": scanned_emails,
+        "skipped_existing": skipped_existing,
+        "total_exported_rows": len(rows),
+        "claude_calls_attempted": claude_calls_attempted,
+        "claude_success_count": claude_success_count,
+        "claude_error_count": claude_error_count,
+        "claude_positive_count": claude_positive_count,
+        "claude_avg_match_pct": claude_avg_match_pct,
+        "claude_max_match_pct": claude_max_match_pct,
+        "dataset_positive_count": dataset_positive_count,
+        "dataset_avg_match_pct": dataset_avg_match_pct,
+        "dataset_max_match_pct": dataset_max_match_pct,
+        "top_5_claude_rows": [
+            {
+                "title": (r.get("job_title") or r.get("subject", ""))[:180],
+                "subject": r.get("subject", "")[:180],
+                "match_pct": _safe_int(r.get("claude_match_pct", 0)),
+                "track": r.get("claude_cv_track") or r.get("best_track", ""),
+                "error": str(r.get("claude_error", "") or "")[:120],
+            }
+            for r in top_5_claude_rows
+        ],
+    }
+    summary_file = os.path.join(os.path.dirname(__file__), "scan_run_summary.json")
+    try:
+        with open(summary_file, "w", encoding="utf-8") as sf:
+            json.dump(summary_payload, sf, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[scan] warning: could not write scan_run_summary.json: {e}")
 
 
 if __name__ == "__main__":

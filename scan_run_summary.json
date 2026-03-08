@@ -1,0 +1,52 @@
+{
+  "run_timestamp": "2026-03-08T16:34:20.539991+00:00",
+  "scanned_emails": 60,
+  "skipped_existing": 0,
+  "total_exported_rows": 45,
+  "claude_calls_attempted": 45,
+  "claude_success_count": 30,
+  "claude_error_count": 15,
+  "claude_positive_count": 25,
+  "claude_avg_match_pct": 16.44,
+  "claude_max_match_pct": 65,
+  "dataset_positive_count": 25,
+  "dataset_avg_match_pct": 16.44,
+  "dataset_max_match_pct": 65,
+  "top_5_claude_rows": [
+    {
+      "title": "מקומות תעסוקה בסגנון של מהנדס/ת מצוינות תפעולית at PepsiCo",
+      "subject": "מקומות תעסוקה חדשים דומים ל מהנדס/ת מצוינות תפעולית - at PepsiCo",
+      "match_pct": 65,
+      "track": "תפעול",
+      "error": ""
+    },
+    {
+      "title": "12K איש אחזקה עם ידע בI.T לקיבוץ ליד אופקים!",
+      "subject": "כל המשרות שעלו הסופ\"ש ב-AllJobs ויכולות להתאים לך",
+      "match_pct": 60,
+      "track": "אחזקה",
+      "error": ""
+    },
+    {
+      "title": "12K איש אחזקה עם ידע בI.T לקיבוץ ליד אופקים!",
+      "subject": "כל המשרות שעלו היום ב-AllJobs ויכולות להתאים לך",
+      "match_pct": 55,
+      "track": "אחזקה",
+      "error": ""
+    },
+    {
+      "title": "מקומות תעסוקה בסגנון של Operations Coordinator at WAXMAN GROUP",
+      "subject": "מקומות תעסוקה חדשים דומים ל Operations Coordinator - at WAXMAN GROUP",
+      "match_pct": 45,
+      "track": "תפעול",
+      "error": ""
+    },
+    {
+      "title": "Production Manager - מנהל.ת ייצור ‏Kimberly-Clark‏ · ‏Hadera‏ (‏‏) צפייה",
+      "subject": "מגמות קריירה חדשות Production Manager",
+      "match_pct": 45,
+      "track": "תפעול",
+      "error": ""
+    }
+  ]
+}

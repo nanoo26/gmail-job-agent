@@ -3,7 +3,7 @@ import json
 import os
 import pathlib
 import re
-from html import escape
+from html import escape, unescape
 from urllib.parse import urlencode, urlparse, urlunparse, parse_qs
 
 import pandas as pd
@@ -16,6 +16,7 @@ st.set_page_config(page_title="דשבורד משרות מג׳ימייל", layout
 FAVORITES_FILE = str(pathlib.Path(__file__).parent / "favorites.json")   # legacy
 STATUS_FILE    = str(pathlib.Path(__file__).parent / "job_status.json")
 PROFILE_FILE   = str(pathlib.Path(__file__).parent / "user_profile.json")
+RUN_SUMMARY_FILE = str(pathlib.Path(__file__).parent / "scan_run_summary.json")
 
 ENABLE_PERSONALIZATION = os.getenv("PERSONALIZATION", "0") == "1"
 if ENABLE_PERSONALIZATION:
@@ -48,6 +49,17 @@ def set_job_status(job_id: str, new_status: str) -> None:
                 st.session_state.pers_profile = profile
         except Exception:
             pass
+
+
+def load_scan_run_summary(path: str = RUN_SUMMARY_FILE) -> dict | None:
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else None
+    except Exception:
+        return None
 
 
 # --- Dedup helpers ---
@@ -84,10 +96,59 @@ DIRECT_JOB_RE = re.compile(
 )
 
 
+def _normalize_alljobs_url_value(url: str) -> str:
+    cleaned = unescape((url or "").strip())
+    for _ in range(2):
+        if "&amp;" in cleaned:
+            cleaned = cleaned.replace("&amp;", "&")
+    return cleaned
+
+
+def _extract_alljobs_job_id(url: str) -> str:
+    cleaned = _normalize_alljobs_url_value(url)
+    if not cleaned:
+        return ""
+    try:
+        parsed = urlparse(cleaned)
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        for key, values in params.items():
+            key_norm = key.lower().replace("amp;", "")
+            if key_norm == "jobid" and values:
+                m = re.search(r'(\d{4,})', unescape(str(values[0])))
+                if m:
+                    return m.group(1)
+            for raw_val in values or []:
+                dec = unescape(str(raw_val))
+                m_nested = re.search(r'jobid=([^&#]+)', dec, re.IGNORECASE)
+                if m_nested:
+                    m = re.search(r'(\d{4,})', m_nested.group(1))
+                    if m:
+                        return m.group(1)
+    except Exception:
+        pass
+    m = re.search(r'[?&]jobid=([^&#]+)', cleaned, re.IGNORECASE)
+    if m:
+        m2 = re.search(r'(\d{4,})', m.group(1))
+        if m2:
+            return m2.group(1)
+    return ""
+
+
 def _unwrap_redirect_url(url: str) -> str:
     """Extract the real destination from common tracking/redirect URLs."""
     if not url or not url.startswith("http"):
         return url
+    if "alljobs.co.il" in url.lower():
+        cleaned = _normalize_alljobs_url_value(url)
+        jid = _extract_alljobs_job_id(cleaned)
+        if jid:
+            return f"https://www.alljobs.co.il/Search/UploadSingle.aspx?JobID={jid}"
+        if "/user/mailsredirect/" in cleaned.lower() or cleaned.lower().rstrip("/") in (
+            "https://www.alljobs.co.il",
+            "http://www.alljobs.co.il",
+        ):
+            return "https://www.alljobs.co.il/User/JobsFeed/"
+        return cleaned
     # LinkedIn /comm/jobs/view/ID → direct jobs/view/ID
     m = re.search(r'linkedin\.com/comm/(jobs/view/\d+)', url, re.IGNORECASE)
     if m:
@@ -140,6 +201,8 @@ def resolve_best_url(job_url: str, gmail_link: str) -> tuple:
     if url and url.startswith("http"):
         url = _unwrap_redirect_url(url)
         url = normalize_job_url(url)          # strip utm / trk / fbclid etc.
+        if "alljobs.co.il" in url.lower() and not DIRECT_JOB_RE.search(url):
+            return ("https://www.alljobs.co.il/User/JobsFeed/", False)
         if _is_homepage_url(url):
             return (gmail_link or "").strip(), False
         is_direct = bool(DIRECT_JOB_RE.search(url))
@@ -790,6 +853,66 @@ st.download_button(
     file_name="job_emails_filtered.csv",
     mime="text/csv",
 )
+
+st.divider()
+st.subheader("דוח Claude מההרצה האחרונה")
+
+run_summary = load_scan_run_summary()
+if not run_summary:
+    st.info("אין דוח הרצה זמין עדיין")
+else:
+    run_ts = str(run_summary.get("run_timestamp", "")).strip()
+    if run_ts:
+        st.caption(f"זמן הרצה: {run_ts}")
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("קריאות Claude", int(run_summary.get("claude_calls_attempted", 0) or 0))
+    m2.metric("הצלחות", int(run_summary.get("claude_success_count", 0) or 0))
+    m3.metric("שגיאות", int(run_summary.get("claude_error_count", 0) or 0))
+    m4.metric("התאמות חיוביות", int(run_summary.get("claude_positive_count", 0) or 0))
+    avg_pct = run_summary.get("claude_avg_match_pct", 0)
+    max_pct = int(run_summary.get("claude_max_match_pct", 0) or 0)
+    m5.metric("ממוצע / מקסימום", f"{avg_pct}% / {max_pct}%")
+
+    d1, d2, d3 = st.columns(3)
+    d1.metric("התאמות Claude ב-CSV", int(run_summary.get("dataset_positive_count", 0) or 0))
+    d2.metric("ממוצע ב-CSV", f"{run_summary.get('dataset_avg_match_pct', 0)}%")
+    d3.metric("מקסימום ב-CSV", f"{int(run_summary.get('dataset_max_match_pct', 0) or 0)}%")
+
+    top_rows = run_summary.get("top_5_claude_rows", [])
+    if not top_rows:
+        # Backward-compatible fallback when old summary files lack top rows.
+        _tmp = df.copy()
+        _tmp["_cm"] = pd.to_numeric(_tmp.get("claude_match_pct", 0), errors="coerce").fillna(0).astype(int)
+        _tmp = _tmp.sort_values(["_cm", "final_score"], ascending=[False, False]).drop_duplicates(
+            subset=["job_id"], keep="first"
+        )
+        top_rows = []
+        for _, rr in _tmp.head(5).iterrows():
+            top_rows.append(
+                {
+                    "title": str(rr.get("job_title") or rr.get("subject", ""))[:180],
+                    "match_pct": int(rr.get("_cm", 0) or 0),
+                    "track": str(rr.get("claude_cv_track") or rr.get("best_track", "")),
+                    "error": str(rr.get("claude_error", "") or "")[:120],
+                }
+            )
+
+    if isinstance(top_rows, list) and top_rows:
+        top_df = pd.DataFrame(top_rows)
+        col_order = [c for c in ["title", "match_pct", "track", "error"] if c in top_df.columns]
+        if col_order:
+            top_df = top_df[col_order].rename(
+                columns={
+                    "title": "משרה",
+                    "match_pct": "% התאמה",
+                    "track": "מסלול",
+                    "error": "שגיאה",
+                }
+            )
+        st.dataframe(top_df, use_container_width=True, hide_index=True)
+    else:
+        st.caption("אין שורות Claude להצגה בדוח האחרון")
 
 # ---------------------------------------------------------------------------
 # JS block: CSS injection for ag-Grid theme.
