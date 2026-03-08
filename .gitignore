@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+
+# Virtual environment
+.venv/
+venv/
+
+# Secrets and local auth
+.env
+token.json
+client_secret.json
+
+# Runtime/app state
+job_status.json
+favorites.json
+user_profile.json
+
+# Generated data exports
+job_emails.csv
+job_emails_claude.csv
+job_emails_filtered.csv
+
+# Local/temporary artifacts
+tmp_video_frames/
+tmp_video_input.mp4
+tmpclaude-*/
+tmpclaude-*
+nul
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.codex/
+skills/
