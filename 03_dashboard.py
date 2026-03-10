@@ -382,11 +382,20 @@ def dedup_jobs(df):
 @st.cache_data
 def load_data(path="job_emails.csv"):
     if not os.path.exists(path):
-        return pd.DataFrame()
-    try:
-        df = pd.read_csv(path)
-    except Exception:
-        return pd.DataFrame()
+        return pd.DataFrame(), f"missing file: {path}"
+    read_attempts = [
+        {"encoding": "utf-8"},
+        {"encoding": "utf-8-sig"},
+        {"encoding": "utf-8-sig", "engine": "python", "on_bad_lines": "skip"},
+    ]
+    last_err = ""
+    for kwargs in read_attempts:
+        try:
+            df = pd.read_csv(path, **kwargs)
+            return df, ""
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+    return pd.DataFrame(), last_err or "unknown csv read error"
     if "date" in df.columns:
         df["date_parsed"] = pd.to_datetime(df["date"], format="mixed", errors="coerce", utc=True)
     for col in ["it_score", "ops_score", "maint_score", "top_score", "cv_boost", "claude_match_pct"]:
@@ -408,10 +417,13 @@ def load_data(path="job_emails.csv"):
     return df
 
 
-df = load_data()
+df, _load_data_error = load_data()
 
 if df.empty:
-    st.warning("קובץ job_emails.csv ריק/לא נטען. הרץ קודם: python 02_scan_jobs.py")
+    msg = "קובץ job_emails.csv ריק/לא נטען. הרץ קודם: python 02_scan_jobs.py"
+    if _load_data_error:
+        msg += f"\nשגיאה: {_load_data_error}"
+    st.warning(msg)
     st.stop()
 
 
