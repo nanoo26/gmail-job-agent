@@ -1,51 +1,51 @@
 {
-  "run_timestamp": "2026-03-08T16:34:20.539991+00:00",
-  "scanned_emails": 60,
-  "skipped_existing": 0,
-  "total_exported_rows": 45,
-  "claude_calls_attempted": 45,
-  "claude_success_count": 30,
-  "claude_error_count": 15,
-  "claude_positive_count": 25,
-  "claude_avg_match_pct": 16.44,
-  "claude_max_match_pct": 65,
-  "dataset_positive_count": 25,
-  "dataset_avg_match_pct": 16.44,
-  "dataset_max_match_pct": 65,
+  "run_timestamp": "2026-03-09T20:21:22.095904+00:00",
+  "scanned_emails": 88,
+  "skipped_existing": 72,
+  "total_exported_rows": 115,
+  "claude_calls_attempted": 43,
+  "claude_success_count": 43,
+  "claude_error_count": 0,
+  "claude_positive_count": 39,
+  "claude_avg_match_pct": 39.14,
+  "claude_max_match_pct": 85,
+  "dataset_positive_count": 104,
+  "dataset_avg_match_pct": 34.18,
+  "dataset_max_match_pct": 85,
   "top_5_claude_rows": [
     {
-      "title": "מקומות תעסוקה בסגנון של מהנדס/ת מצוינות תפעולית at PepsiCo",
-      "subject": "מקומות תעסוקה חדשים דומים ל מהנדס/ת מצוינות תפעולית - at PepsiCo",
-      "match_pct": 65,
-      "track": "תפעול",
-      "error": ""
-    },
-    {
-      "title": "12K איש אחזקה עם ידע בI.T לקיבוץ ליד אופקים!",
-      "subject": "כל המשרות שעלו הסופ\"ש ב-AllJobs ויכולות להתאים לך",
-      "match_pct": 60,
-      "track": "אחזקה",
-      "error": ""
-    },
-    {
-      "title": "12K איש אחזקה עם ידע בI.T לקיבוץ ליד אופקים!",
+      "title": "איש תמיכה טכנית למשתמשי קצה. IT Support Help desk",
       "subject": "כל המשרות שעלו היום ב-AllJobs ויכולות להתאים לך",
-      "match_pct": 55,
+      "match_pct": 85,
+      "track": "IT",
+      "error": ""
+    },
+    {
+      "title": "איש תמיכה טכנית למשתמשי קצה. IT Support Help desk",
+      "subject": "כל המשרות שעלו היום ב-AllJobs ויכולות להתאים לך",
+      "match_pct": 85,
+      "track": "IT",
+      "error": ""
+    },
+    {
+      "title": "IT Help desk",
+      "subject": "כל המשרות שעלו היום ב-AllJobs ויכולות להתאים לך",
+      "match_pct": 85,
+      "track": "IT",
+      "error": ""
+    },
+    {
+      "title": "תומך /ת Help desk - משרה זמנית (אשדוד)",
+      "subject": "כל המשרות שעלו היום ב-AllJobs ויכולות להתאים לך",
+      "match_pct": 85,
+      "track": "IT",
+      "error": ""
+    },
+    {
+      "title": "55 שקלים לשעה! איש אחזקה עם ידע באינסטלציה למחלקת אחזקה לקיבוץ ליד נתיבות!",
+      "subject": "כל המשרות שעלו היום ב-AllJobs ויכולות להתאים לך",
+      "match_pct": 82,
       "track": "אחזקה",
-      "error": ""
-    },
-    {
-      "title": "מקומות תעסוקה בסגנון של Operations Coordinator at WAXMAN GROUP",
-      "subject": "מקומות תעסוקה חדשים דומים ל Operations Coordinator - at WAXMAN GROUP",
-      "match_pct": 45,
-      "track": "תפעול",
-      "error": ""
-    },
-    {
-      "title": "Production Manager - מנהל.ת ייצור ‏Kimberly-Clark‏ · ‏Hadera‏ (‏‏) צפייה",
-      "subject": "מגמות קריירה חדשות Production Manager",
-      "match_pct": 45,
-      "track": "תפעול",
       "error": ""
     }
   ]

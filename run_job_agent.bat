@@ -1,6 +1,8 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 title Gmail Job Agent
+chcp 65001 >nul
+set "PYTHONIOENCODING=utf-8"
 
 echo ========================================
 echo Starting Gmail Job Agent...
@@ -54,6 +56,10 @@ echo Note: Claude API key will be resolved by Python ^(.env file or system env v
 
 REM ---- Run unified scan ----
 set "SCAN_FAILED=0"
+set "SCAN_LIMIT=100"
+set "SCAN_FROM_YEAR_START=1"
+set "CLAUDE_DEBUG_STOP_EARLY=0"
+set "CLAUDE_MAX_PER_RUN=100"
 echo Running email scan...
 "%PYTHON_EXE%" 02_scan_jobs.py
 if errorlevel 1 (

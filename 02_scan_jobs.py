@@ -58,6 +58,8 @@ _SCAN_LIMIT = _env_int("SCAN_LIMIT", 60)
 _SCAN_DEBUG_MODE = _env_flag("SCAN_DEBUG_MODE", False)
 _SCAN_DEBUG_LIMIT = _env_int("SCAN_DEBUG_LIMIT", 20)
 _SCAN_FETCH_BUFFER = _env_int("SCAN_FETCH_BUFFER", 80)
+_SCAN_DAYS_BACK = _env_int("SCAN_DAYS_BACK", 90)
+_SCAN_FROM_YEAR_START = _env_flag("SCAN_FROM_YEAR_START", False)
 if _ANTHROPIC_API_KEY:
     try:
         import anthropic as _anthropic_mod
@@ -482,6 +484,7 @@ Job Posting:
 ---
 
 Respond with ONLY valid JSON. No markdown, no code fences, no text before or after the JSON.
+Output MUST be a single-line minified JSON object.
 
 Use exactly this schema:
 {{
@@ -496,8 +499,10 @@ Use exactly this schema:
 Rules:
 - match_pct: integer 0-100
 - recommended_cv_track: exactly one of ["IT", "תפעול", "אחזקה"]
-- strengths, gaps: arrays of short Hebrew or English strings
-- recommendation, reasoning: short strings
+- strengths: max 3 short items (each up to 60 chars)
+- gaps: max 2 short items (each up to 60 chars)
+- recommendation, reasoning: very short strings (each up to 120 chars)
+- Avoid using double-quote characters inside values.
 - Output ONLY the JSON object, nothing else."""
 
     def _short_api_error(err: Exception) -> str:
@@ -510,6 +515,103 @@ Rules:
         prefix = f"status={status} " if status else ""
         return f"{prefix}{detail}"[:240]
 
+    def _strip_code_fence(text: str) -> str:
+        out = (text or "").strip()
+        if out.startswith("```"):
+            out = re.sub(r"^```[a-z]*\n?", "", out, flags=re.IGNORECASE)
+            out = re.sub(r"\n?```$", "", out).strip()
+        return out
+
+    def _extract_list_field(text: str, field: str, limit: int) -> list[str]:
+        m = re.search(rf'["\']?{field}["\']?\s*:\s*\[(.*?)\]', text, re.IGNORECASE | re.DOTALL)
+        if not m:
+            return []
+        inner = m.group(1)
+        vals = [v.strip() for v in re.findall(r'"([^"]{1,120})"|\'([^\']{1,120})\'', inner)]
+        flattened: list[str] = []
+        for pair in vals:
+            if isinstance(pair, tuple):
+                flattened.append((pair[0] or pair[1]).strip())
+            else:
+                flattened.append(str(pair).strip())
+        return [v for v in flattened if v][:limit]
+
+    def _extract_text_field(text: str, field: str, max_len: int = 240) -> str:
+        # Try strict quoted extraction first (double/single quotes).
+        strict = re.search(
+            rf'["\']?{field}["\']?\s*:\s*(?:"([^"\\]*(?:\\.[^"\\]*)*)"|\'([^\'\\]*(?:\\.[^\'\\]*)*)\')',
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if strict:
+            value = strict.group(1) or strict.group(2) or ""
+            return value.strip()[:max_len]
+
+        # Fallback: tolerate truncated strings until line break/comma/brace.
+        loose = re.search(
+            rf'["\']?{field}["\']?\s*:\s*([^\n\r,}}]{{1,{max_len}}})',
+            text,
+            re.IGNORECASE,
+        )
+        if not loose:
+            return ""
+        value = loose.group(1).strip().strip('"').strip("'").strip()
+        return value[:max_len]
+
+    def _extract_match_pct(text: str) -> int | None:
+        patterns = [
+            r'["\']?match_pct["\']?\s*[:=]\s*["\']?(\d{1,3})',
+            r'["\']?match["\']?\s*[:=]\s*["\']?(\d{1,3})',
+            r'["\']?score["\']?\s*[:=]\s*["\']?(\d{1,3})',
+        ]
+        for pat in patterns:
+            m = re.search(pat, text, re.IGNORECASE)
+            if not m:
+                continue
+            try:
+                value = int(m.group(1))
+            except Exception:
+                continue
+            return max(0, min(100, value))
+        return None
+
+    def _normalize_track(value: str) -> str:
+        raw_val = str(value or "").strip()
+        low = raw_val.lower()
+        if raw_val == "IT" or low == "it":
+            return "IT"
+        if "תפעול" in raw_val or "ops" in low or "operation" in low:
+            return "תפעול"
+        if "אחזקה" in raw_val or "maint" in low or "facility" in low:
+            return "אחזקה"
+        return ""
+
+    def _best_effort_parse(text: str) -> dict | None:
+        if not text:
+            return None
+
+        normalized = (
+            (text or "")
+            .replace("\u201c", '"')
+            .replace("\u201d", '"')
+            .replace("\u2018", "'")
+            .replace("\u2019", "'")
+        )
+        match_pct = _extract_match_pct(normalized)
+        if match_pct is None:
+            return None
+
+        data: dict = {"match_pct": match_pct}
+        m_track = re.search(r'["\']?recommended_cv_track["\']?\s*:\s*["\']([^"\']{1,40})["\']', normalized, re.IGNORECASE)
+        if m_track:
+            data["recommended_cv_track"] = m_track.group(1)
+        data["strengths"] = _extract_list_field(normalized, "strengths", 3)
+        data["gaps"] = _extract_list_field(normalized, "gaps", 2)
+        rec = _extract_text_field(normalized, "recommendation", 240)
+        if rec:
+            data["recommendation"] = rec
+        return data
+
     global _CLAUDE_MODEL
     models_to_try = [_CLAUDE_MODEL] + [m for m in _CLAUDE_FALLBACK_MODELS if m != _CLAUDE_MODEL]
     tried_errors = []
@@ -519,26 +621,31 @@ Rules:
         try:
             message = client.messages.create(
                 model=model_name,
-                max_tokens=400,
+                max_tokens=900,
+                temperature=0,
                 messages=[{"role": "user", "content": prompt}],
             )
-            raw = message.content[0].text.strip()
+            raw = _strip_code_fence(message.content[0].text)
 
-            if raw.startswith("```"):
-                raw = re.sub(r"^```[a-z]*\n?", "", raw)
-                raw = re.sub(r"\n?```$", "", raw).strip()
+            parse_mode = "strict_json"
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                data = _best_effort_parse(raw)
+                if not data:
+                    raise
+                parse_mode = "best_effort"
 
-            data = json.loads(raw)
+            match_pct = int(data.get("match_pct", 0) or 0)
+            match_pct = max(0, min(100, match_pct))
 
-            match_pct = int(data.get("match_pct", 0))
-            if not (0 <= match_pct <= 100):
-                raise ValueError(f"match_pct out of range: {match_pct}")
-
-            cv_track = str(data.get("recommended_cv_track", ""))
+            cv_track = _normalize_track(str(data.get("recommended_cv_track", "")))
             strengths = data.get("strengths", [])
             gaps = data.get("gaps", [])
             rec = str(data.get("recommendation", ""))
             parts = []
+            if parse_mode != "strict_json":
+                parts.append("⚠ parsed via fallback")
             if rec:
                 parts.append(rec)
             if strengths:
@@ -938,6 +1045,15 @@ def main(days_back=90, max_results=120, only_inbox=True):
 
 
 if __name__ == "__main__":
-    main(days_back=90, max_results=160, only_inbox=True)
+    run_days_back = _SCAN_DAYS_BACK if _SCAN_DAYS_BACK is not None else 90
+    if _SCAN_FROM_YEAR_START:
+        now_utc = datetime.now(timezone.utc)
+        jan1_utc = datetime(now_utc.year, 1, 1, tzinfo=timezone.utc)
+        run_days_back = max(1, (now_utc - jan1_utc).days + 1)
+        print(f"[scan] using start-of-year window ({now_utc.year}): {run_days_back} days back")
+    else:
+        print(f"[scan] using window: {run_days_back} days back")
+    main(days_back=run_days_back, max_results=160, only_inbox=True)
+
 
 

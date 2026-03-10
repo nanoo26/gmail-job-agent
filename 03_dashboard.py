@@ -15,6 +15,7 @@ st.set_page_config(page_title="דשבורד משרות מג׳ימייל", layout
 # נתיב מוחלט — עובד מכל working directory
 FAVORITES_FILE = str(pathlib.Path(__file__).parent / "favorites.json")   # legacy
 STATUS_FILE    = str(pathlib.Path(__file__).parent / "job_status.json")
+BUSINESS_STATUS_FILE = str(pathlib.Path(__file__).parent / "job_business_status.json")
 PROFILE_FILE   = str(pathlib.Path(__file__).parent / "user_profile.json")
 RUN_SUMMARY_FILE = str(pathlib.Path(__file__).parent / "scan_run_summary.json")
 
@@ -29,6 +30,24 @@ if ENABLE_PERSONALIZATION:
         ENABLE_PERSONALIZATION = False
 
 _VALID_STATUSES = {"🆕", "👁", "⭐", "❌"}
+_STATUS_LABELS = {"🆕": "חדש", "👁": "נצפה", "⭐": "מועדף", "❌": "לא מתאים"}
+_STATUS_CODE_TO_EMOJI = {
+    "new": "🆕",
+    "viewed": "👁",
+    "fav": "⭐",
+    "reject": "❌",
+}
+_STATUS_EMOJI_TO_CODE = {v: k for k, v in _STATUS_CODE_TO_EMOJI.items()}
+_STATUS_PRIORITY = {"🆕": 0, "👁": 1, "❌": 2, "⭐": 3}
+_BUSINESS_VALID = {
+    "fit": {"fit", "no_fit"},
+    "cv_sent": {"sent", "not_sent"},
+    "interview": {"yes", "no"},
+}
+
+
+def _empty_business_status() -> dict:
+    return {"fit": "", "cv_sent": "", "interview": ""}
 
 
 def set_job_status(job_id: str, new_status: str) -> None:
@@ -49,6 +68,24 @@ def set_job_status(job_id: str, new_status: str) -> None:
                 st.session_state.pers_profile = profile
         except Exception:
             pass
+
+
+def set_job_business_status(job_id: str, field: str, value: str) -> None:
+    """Persist a business-status change to session_state and JSON file."""
+    allowed = _BUSINESS_VALID.get(field)
+    if not allowed or value not in allowed:
+        return
+    rec = st.session_state.job_business.get(job_id, {})
+    if not isinstance(rec, dict):
+        rec = _empty_business_status()
+    clean = _empty_business_status()
+    for f_name, f_allowed in _BUSINESS_VALID.items():
+        prev = rec.get(f_name, "")
+        clean[f_name] = prev if prev in f_allowed else ""
+    clean[field] = value
+    st.session_state.job_business[job_id] = clean
+    with open(BUSINESS_STATUS_FILE, "w", encoding="utf-8") as _fj:
+        json.dump(st.session_state.job_business, _fj, ensure_ascii=False)
 
 
 def load_scan_run_summary(path: str = RUN_SUMMARY_FILE) -> dict | None:
@@ -226,6 +263,100 @@ def build_job_id(row) -> str:
     return "hash:" + hashlib.md5(key.encode("utf-8")).hexdigest()[:12]
 
 
+def row_anchor_id(job_id: str) -> str:
+    token = hashlib.md5(str(job_id or "").encode("utf-8")).hexdigest()[:12]
+    return f"jobrow-{token}"
+
+
+def _extract_linkedin_job_id(url: str) -> str:
+    m = re.search(r'linkedin\.com/.*/jobs/view/(\d+)', str(url or ""), re.IGNORECASE)
+    return m.group(1) if m else ""
+
+
+def _normalize_status_value(value: str) -> str:
+    s = str(value or "").strip()
+    if s in _VALID_STATUSES:
+        return s
+    # Defensive aliases for mojibake / legacy encodings
+    return {
+        "â­": "⭐",
+        "ðŸ‘": "👁",
+        "ðŸ†•": "🆕",
+        "âŒ": "❌",
+    }.get(s, "")
+
+
+def _merge_status_value(prev: str, new: str) -> str:
+    if new not in _VALID_STATUSES:
+        return prev if prev in _VALID_STATUSES else ""
+    if prev not in _VALID_STATUSES:
+        return new
+    return new if _STATUS_PRIORITY[new] > _STATUS_PRIORITY[prev] else prev
+
+
+def migrate_status_keys_to_current_df(status: dict, df: pd.DataFrame) -> tuple[dict, bool]:
+    """Map legacy status keys to current canonical job_id values."""
+    if not isinstance(status, dict):
+        return {}, False
+
+    alias_to_jobid: dict[str, str] = {}
+    for jid in df["job_id"].astype(str).tolist():
+        alias_to_jobid[jid] = jid
+        alias_to_jobid[normalize_job_url(jid)] = jid
+        alljobs_id = _extract_alljobs_job_id(jid)
+        if alljobs_id:
+            alias_to_jobid[f"alljobs:{alljobs_id}"] = jid
+            alias_to_jobid[f"https://www.alljobs.co.il/Search/UploadSingle.aspx?JobID={alljobs_id}"] = jid
+        li_id = _extract_linkedin_job_id(jid)
+        if li_id:
+            alias_to_jobid[f"linkedin:{li_id}"] = jid
+
+    migrated: dict[str, str] = {}
+    changed = False
+
+    for raw_key, raw_value in status.items():
+        value = _normalize_status_value(raw_value)
+        if not value:
+            changed = True
+            continue
+
+        raw = unescape(str(raw_key or "").strip())
+        raw = raw.replace("&amp;", "&")
+        norm = normalize_job_url(raw)
+        alljobs_id = _extract_alljobs_job_id(raw)
+        li_id = _extract_linkedin_job_id(raw)
+
+        candidates = [
+            raw,
+            norm,
+        ]
+        if alljobs_id:
+            candidates.extend([
+                f"alljobs:{alljobs_id}",
+                f"https://www.alljobs.co.il/Search/UploadSingle.aspx?JobID={alljobs_id}",
+            ])
+        if li_id:
+            candidates.append(f"linkedin:{li_id}")
+
+        resolved_key = ""
+        for cand in candidates:
+            if cand and cand in alias_to_jobid:
+                resolved_key = alias_to_jobid[cand]
+                break
+        if not resolved_key:
+            resolved_key = norm or raw
+
+        prev = migrated.get(resolved_key, "")
+        merged = _merge_status_value(prev, value)
+        if merged != prev:
+            migrated[resolved_key] = merged
+
+        if resolved_key != raw_key or value != raw_value:
+            changed = True
+
+    return migrated, changed
+
+
 def enrich_with_dedup_info(df):
     if df.empty:
         return df.copy()
@@ -275,7 +406,7 @@ def load_data(path="job_emails.csv"):
 df = load_data()
 
 if df.empty:
-    st.warning("םייל job_emails.csv ריק/לא נטען. הרץ קודם: python 02_scan_jobs.py")
+    st.warning("קובץ job_emails.csv ריק/לא נטען. הרץ קודם: python 02_scan_jobs.py")
     st.stop()
 
 
@@ -319,7 +450,44 @@ elif os.path.exists(FAVORITES_FILE):
     with open(STATUS_FILE, "w", encoding="utf-8") as _fj:
         json.dump(status, _fj, ensure_ascii=False)
 
+# 3) Migrate legacy/redirect/misencoded status keys to current canonical job_id keys
+status, _status_migrated = migrate_status_keys_to_current_df(status, df)
+if _status_migrated:
+    with open(STATUS_FILE, "w", encoding="utf-8") as _fj:
+        json.dump(status, _fj, ensure_ascii=False)
+
 st.session_state.job_status = status
+
+# -- Business status dict:
+# {job_id: {"fit": "fit|no_fit|", "cv_sent": "sent|not_sent|", "interview": "yes|no|"}}
+business_status: dict = {}
+if os.path.exists(BUSINESS_STATUS_FILE):
+    try:
+        with open(BUSINESS_STATUS_FILE, "r", encoding="utf-8") as _f:
+            loaded_business = json.load(_f)
+            if isinstance(loaded_business, dict):
+                business_status = loaded_business
+    except Exception:
+        business_status = {}
+
+st.session_state.job_business = business_status
+
+_business_changed = False
+for _jid in df["job_id"].tolist():
+    _raw = st.session_state.job_business.get(_jid, {})
+    if not isinstance(_raw, dict):
+        _raw = {}
+    _clean = _empty_business_status()
+    for _field, _allowed in _BUSINESS_VALID.items():
+        _val = _raw.get(_field, "")
+        _clean[_field] = _val if _val in _allowed else ""
+    if _raw != _clean:
+        _business_changed = True
+    st.session_state.job_business[_jid] = _clean
+
+if _business_changed:
+    with open(BUSINESS_STATUS_FILE, "w", encoding="utf-8") as _fj:
+        json.dump(st.session_state.job_business, _fj, ensure_ascii=False)
 
 # Status is mandatory: ensure every known job_id has a persisted non-empty status.
 _valid_statuses = {"🆕", "👁", "⭐", "❌"}
@@ -380,11 +548,43 @@ def _qp_first(v):
     return str(v or "")
 
 
+def _status_href(job_id: str, status: str, focus_token: str = "") -> str:
+    params = {"set_status": str(job_id)}
+    if status in _STATUS_CODE_TO_EMOJI:
+        params["v_code"] = status
+    else:
+        params["v"] = str(status)
+    if focus_token:
+        params["focus"] = str(focus_token)
+    return "?" + urlencode(params)
+
+
 _set_jid = _qp_first(st.query_params.get("set_status", ""))
-_set_val = _qp_first(st.query_params.get("v", ""))
+_set_val = _qp_first(st.query_params.get("v", "")).strip()
+_set_code = _qp_first(st.query_params.get("v_code", "")).strip().lower()
+_set_biz_jid = _qp_first(st.query_params.get("set_biz", ""))
+_set_biz_field = _qp_first(st.query_params.get("bf", ""))
+_set_biz_val = _qp_first(st.query_params.get("bv", ""))
+_focus_row = _qp_first(st.query_params.get("focus", ""))
 # Note: ?open= routing removed — job links now point directly to external URLs.
 
+if _set_code in _STATUS_CODE_TO_EMOJI:
+    _set_val = _STATUS_CODE_TO_EMOJI[_set_code]
+
+if (
+    _set_biz_jid
+    and _set_biz_field in _BUSINESS_VALID
+    and _set_biz_val in _BUSINESS_VALID[_set_biz_field]
+):
+    if _focus_row:
+        st.session_state["_focus_row_anchor"] = _focus_row
+    set_job_business_status(_set_biz_jid, _set_biz_field, _set_biz_val)
+    _clear_query_params()
+    st.rerun()
+
 if _set_jid and _set_val in _VALID_STATUSES:
+    if _focus_row:
+        st.session_state["_focus_row_anchor"] = _focus_row
     set_job_status(_set_jid, _set_val)
     _clear_query_params()
     st.rerun()
@@ -446,6 +646,41 @@ else:
         filtered["occurrences_count"] = 1
     if "source_links" not in filtered.columns:
         filtered["source_links"] = filtered["link"]
+
+# -- Quick status popover (choose from list, without searching by scroll) --
+with st.popover("⚡ עדכון סטטוס מהרשימה"):
+    if filtered.empty:
+        st.caption("אין משרות זמינות לעדכון.")
+    else:
+        _quick_df = (
+            filtered[["job_id", "display_subject", "best_track", "final_score"]]
+            .drop_duplicates(subset=["job_id"], keep="first")
+            .sort_values("final_score", ascending=False)
+        )
+        _job_options = _quick_df["job_id"].tolist()
+        _job_labels = {
+            row["job_id"]: f"{str(row['display_subject'])[:70]} | {row['best_track']} | ציון {int(row['final_score'])}"
+            for _, row in _quick_df.iterrows()
+        }
+        _selected_job = st.selectbox(
+            "בחר משרה",
+            options=_job_options,
+            format_func=lambda jid: _job_labels.get(jid, str(jid)),
+            key="quick_status_job",
+        )
+        _current_status = st.session_state.job_status.get(_selected_job, "🆕")
+        _status_options = ["🆕", "👁", "⭐", "❌"]
+        _selected_status = st.selectbox(
+            "בחר סטטוס",
+            options=_status_options,
+            index=_status_options.index(_current_status) if _current_status in _status_options else 0,
+            format_func=lambda s: f"{s} {_STATUS_LABELS.get(s, '')}",
+            key="quick_status_value",
+        )
+        if st.button("שמור סטטוס", key="quick_status_save", width="content"):
+            st.session_state["_focus_row_anchor"] = row_anchor_id(_selected_job)
+            set_job_status(_selected_job, _selected_status)
+            st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -575,9 +810,9 @@ _COL_CONFIG = {
     "display_subject_view": st.column_config.TextColumn("משרה",        width="large"),
     "snippet_view":      st.column_config.TextColumn("תקציר",          width="large"),
     "occurrences_count": st.column_config.NumberColumn("מופעיות",   format="%d", width="small"),
-    "claude_match_pct":  st.column_config.NumberColumn("% 🤖",         format="%d%%", width="small"),
+    "claude_match_pct":  st.column_config.NumberColumn("Claude %",     format="%d%%", width="small"),
     "claude_analysis_view": st.column_config.TextColumn("ניתוח Claude",  width="large"),
-    "link_type":         st.column_config.TextColumn("🔗 סוג",       width="small"),
+    "link_type":         st.column_config.TextColumn("סוג קישור",    width="small"),
     "job_link":          st.column_config.LinkColumn("צפה במשרה",    width="small", display_text="פתח"),
 }
 
@@ -616,7 +851,7 @@ def _prepare_show(df_part):
     return out, [c for c in cols if c in out.columns]
 
 
-def _render_accessible_preview_table(df_part, max_rows: int = 15):
+def _render_accessible_preview_table(df_part, max_rows: int = 15, focus_anchor: str = ""):
     """Render a styled, high-contrast HTML table preview (read-only)."""
     if df_part.empty:
         st.info("אין נתונים להצגה בתצוגת הטבלה החדשה.")
@@ -635,7 +870,7 @@ def _render_accessible_preview_table(df_part, max_rows: int = 15):
 .jobs-preview {
   width: 100%;
   border-collapse: collapse;
-  min-width: 980px;
+  min-width: 1280px;
   direction: rtl;
 }
 .jobs-preview thead th {
@@ -669,8 +904,22 @@ def _render_accessible_preview_table(df_part, max_rows: int = 15):
   font-weight: 700;
 }
 .jobs-preview .job-link:visited { color: #c4b5fd; }
-.jobs-preview .status-picker { display: flex; gap: 3px; justify-content: center; }
 .jobs-preview .status-form { display: inline-block; margin: 0; }
+.jobs-preview .status-select {
+  background: rgba(15, 23, 42, 0.92);
+  color: #e2e8f0;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  border-radius: 8px;
+  padding: 3px 8px;
+  font-size: 12px;
+  min-width: 98px;
+  text-align: center;
+  cursor: pointer;
+}
+.jobs-preview .status-select:focus {
+  outline: none;
+  border-color: rgba(125, 211, 252, 0.8);
+}
 .jobs-preview .status-btn {
   display: inline-block;
   background: transparent;
@@ -687,8 +936,27 @@ def _render_accessible_preview_table(df_part, max_rows: int = 15):
 }
 .jobs-preview .status-btn:hover { opacity: 0.9; border-color: rgba(125, 211, 252, 0.7); }
 .jobs-preview .status-btn.active { opacity: 1; border-color: rgba(125, 211, 252, 0.8); font-weight: 700; }
+.jobs-preview .biz-picker { display: flex; gap: 4px; justify-content: center; }
+.jobs-preview .biz-btn {
+  display: inline-block;
+  background: transparent;
+  cursor: pointer;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 0.74rem;
+  color: #e2e8f0;
+  line-height: 1.25;
+  text-decoration: none !important;
+  opacity: 0.55;
+  transition: opacity 0.15s, border-color 0.15s;
+}
+.jobs-preview .biz-btn:hover { opacity: 0.95; border-color: rgba(125, 211, 252, 0.7); }
+.jobs-preview .biz-btn.active { opacity: 1; border-color: rgba(125, 211, 252, 0.9); font-weight: 700; }
 .jobs-preview .view-btn {
   display: inline-block;
+  background: transparent;
+  cursor: pointer;
   border: 1px solid rgba(250, 204, 21, 0.45);
   border-radius: 999px;
   padding: 2px 8px;
@@ -723,40 +991,98 @@ def _render_accessible_preview_table(df_part, max_rows: int = 15):
 </style>
 """
 
-    def _status_picker(job_id: str, current: str) -> str:
-        icons = [("🆕", "חדש"), ("👁", "נצפה"), ("⭐", "מועדף"), ("❌", "לא מתאים")]
-        forms = []
-        for icon, label in icons:
-            active_cls = " active" if current == icon else ""
-            forms.append(
-                '<form method="get" class="status-form">'
-                f'<input type="hidden" name="set_status" value="{escape(job_id)}">'
-                f'<input type="hidden" name="v" value="{escape(icon)}">'
-                f'<button type="submit" class="status-btn{active_cls}" title="{escape(label)}">{icon}</button>'
-                '</form>'
+    def _status_picker(job_id: str, current: str, focus_token: str) -> str:
+        options = [
+            ("🆕", "חדש", "new"),
+            ("👁", "נצפה", "viewed"),
+            ("⭐", "מועדף", "fav"),
+            ("❌", "לא מתאים", "reject"),
+        ]
+        if current not in {opt[0] for opt in options}:
+            current = "🆕"
+        current_code = _STATUS_EMOJI_TO_CODE.get(current, "new")
+        items = []
+        for icon, label, status_code in options:
+            items.append(
+                f'<option value="{escape(status_code)}"{" selected" if status_code == current_code else ""}>{escape(icon)} {escape(label)}</option>'
             )
-        return f'<span class="status-picker">{"".join(forms)}</span>'
+        return (
+            '<form method="get" class="status-form">'
+            f'<input type="hidden" name="set_status" value="{escape(job_id)}">'
+            f'<input type="hidden" name="focus" value="{escape(focus_token)}">'
+            f'<select name="v_code" class="status-select" aria-label="סטטוס משרה">{"".join(items)}</select>'
+            '</form>'
+        )
 
-    def _mark_viewed_btn(current: str, best_url: str) -> str:
+    def _mark_viewed_btn(job_id: str, current: str, focus_token: str) -> str:
         if current == "👁":
             return '<span class="view-btn done">✓ נצפה</span>'
-        if best_url.startswith("http"):
-            return (
-                f'<a href="{escape(best_url)}" class="view-btn" title="פתח משרה" '
-                'target="_blank" rel="noopener">👁 פתח</a>'
+        return (
+            '<form method="get" class="status-form">'
+            f'<input type="hidden" name="set_status" value="{escape(job_id)}">'
+            '<input type="hidden" name="v_code" value="viewed">'
+            f'<input type="hidden" name="focus" value="{escape(focus_token)}">'
+            '<button type="submit" class="view-btn" title="סמן כנצפה">👁 סמן</button>'
+            '</form>'
+        )
+
+    def _business_picker(job_id: str, field: str, current: str, options, focus_token: str) -> str:
+        forms = []
+        for val, label, title in options:
+            active_cls = " active" if current == val else ""
+            forms.append(
+                '<form method="get" class="status-form">'
+                f'<input type="hidden" name="set_biz" value="{escape(job_id)}">'
+                f'<input type="hidden" name="bf" value="{escape(field)}">'
+                f'<input type="hidden" name="bv" value="{escape(val)}">'
+                f'<input type="hidden" name="focus" value="{escape(focus_token)}">'
+                f'<button type="submit" class="biz-btn{active_cls}" title="{escape(title)}">{escape(label)}</button>'
+                '</form>'
             )
-        return '<span class="badge">—</span>'
+        return f'<span class="biz-picker">{"".join(forms)}</span>'
 
     trs = []
-    _show_pers = "pers_delta" in rows.columns
+    _show_pers = (
+        "pers_delta" in rows.columns
+        and rows["pers_delta"].fillna(0).astype(float).abs().gt(0).any()
+    )
     _show_claude = "claude_match_pct" in rows.columns and rows["claude_match_pct"].gt(0).any()
     for _, r in rows.iterrows():
         status_val = str(r.get("סטטוס", "🆕"))
         job_id = str(r.get("job_id", ""))
+        focus_token = row_anchor_id(job_id)
+        biz_rec = st.session_state.job_business.get(job_id, {})
+        if not isinstance(biz_rec, dict):
+            biz_rec = _empty_business_status()
+        fit_val = str(biz_rec.get("fit", ""))
+        cv_sent_val = str(biz_rec.get("cv_sent", ""))
+        interview_val = str(biz_rec.get("interview", ""))
+        fit_html = _business_picker(
+            job_id,
+            "fit",
+            fit_val,
+            [("fit", "✓ מתאים", "מתאים"), ("no_fit", "✗ לא מתאים", "לא מתאים")],
+            focus_token,
+        )
+        cv_sent_html = _business_picker(
+            job_id,
+            "cv_sent",
+            cv_sent_val,
+            [("sent", "✓ נשלחו", "קורות חיים נשלחו"), ("not_sent", "✗ לא", "קורות חיים לא נשלחו")],
+            focus_token,
+        )
+        interview_html = _business_picker(
+            job_id,
+            "interview",
+            interview_val,
+            [("yes", "✓ זומן", "זומן לראיון"), ("no", "✗ לא", "לא זומן לראיון")],
+            focus_token,
+        )
         best_url, _ = resolve_best_url(str(r.get("job_url", "")), str(r.get("link", "")))
+        status_href = _status_href(job_id, "viewed", focus_token)
         # Direct link — no ?open= router; viewed-state is no longer auto-marked on open.
         link_html = (
-            f'<a class="job-link" href="{escape(best_url)}" target="_blank" rel="noopener">פתח משרה</a>'
+            f'<a class="job-link js-open-and-view" href="{escape(best_url)}" target="_blank" rel="noopener" data-status-url="{escape(status_href)}">פתח משרה</a>'
             if best_url.startswith("http")
             else '<span class="badge rej">ללא לינק</span>'
         )
@@ -780,9 +1106,12 @@ def _render_accessible_preview_table(df_part, max_rows: int = 15):
                 if _cpct > 0 else '<td class="num">—</td>'
             )
         trs.append(
-            "<tr>"
-            f'<td class="num">{_status_picker(job_id, status_val)}</td>'
-            f'<td class="num">{_mark_viewed_btn(status_val, best_url)}</td>'
+            f'<tr id="{escape(focus_token)}">'
+            f'<td class="num">{_status_picker(job_id, status_val, focus_token)}</td>'
+            f'<td class="num">{_mark_viewed_btn(job_id, status_val, focus_token)}</td>'
+            f'<td class="num">{fit_html}</td>'
+            f'<td class="num">{cv_sent_html}</td>'
+            f'<td class="num">{interview_html}</td>'
             f'<td class="num">{int(r.get("final_score", 0))}</td>'
             + (_pers_cell if _show_pers else "")
             + (_claude_cell if _show_claude else "")
@@ -794,14 +1123,17 @@ def _render_accessible_preview_table(df_part, max_rows: int = 15):
             "</tr>"
         )
 
-    _pers_th = "<th scope='col'>🧠</th>" if _show_pers else ""
-    _claude_th = "<th scope='col'>🤖%</th>" if _show_claude else ""
+    _pers_th = "<th scope='col'>ציון אישי</th>" if _show_pers else ""
+    _claude_th = "<th scope='col'>Claude %</th>" if _show_claude else ""
     table_html = (
         '<div class="jobs-preview-wrap">'
         '<table class="jobs-preview" role="table" aria-label="תצוגת משרות נגישה">'
         "<thead><tr>"
         "<th scope='col'>סטטוס</th>"
         "<th scope='col'>נצפה</th>"
+        "<th scope='col'>התאמה</th>"
+        "<th scope='col'>קו\"ח</th>"
+        "<th scope='col'>ראיון</th>"
         "<th scope='col'>ציון</th>"
         + _pers_th
         + _claude_th
@@ -816,13 +1148,36 @@ def _render_accessible_preview_table(df_part, max_rows: int = 15):
     )
 
     st.markdown(style + table_html, unsafe_allow_html=True)
+    if focus_anchor:
+        st.components.v1.html(
+            f"""
+<script>
+(() => {{
+  const anchor = {json.dumps(focus_anchor)};
+  if (!anchor) return;
+  function scrollToAnchor() {{
+    const doc = (window.parent && window.parent.document) ? window.parent.document : document;
+    const el = doc.getElementById(anchor);
+    if (el) {{
+      el.scrollIntoView({{ behavior: "auto", block: "center" }});
+    }}
+  }}
+  setTimeout(scrollToAnchor, 0);
+  setTimeout(scrollToAnchor, 120);
+  setTimeout(scrollToAnchor, 360);
+}})();
+</script>
+""",
+            height=0,
+        )
 
 
 # Active jobs table
 show_a, dcols_a = _prepare_show(show_active)
+_pending_focus_anchor = str(st.session_state.pop("_focus_row_anchor", "") or "").strip()
 
 st.markdown("#### תצוגה חדשה ונגישה")
-_render_accessible_preview_table(show_a, max_rows=topn)
+_render_accessible_preview_table(show_a, max_rows=topn, focus_anchor=_pending_focus_anchor)
 
 # Sources expander for multi-source deduplicated jobs (active only)
 if dedup_on and "source_links" in show_a.columns:
@@ -845,7 +1200,7 @@ if len(show_rejected) > 0:
     st.divider()
     st.markdown(f"#### ❌ משרות שסומנו כלא מתאים ({len(show_rejected)} משרות)")
     show_r, dcols_r = _prepare_show(show_rejected)
-    _render_accessible_preview_table(show_r, max_rows=max(10, topn))
+    _render_accessible_preview_table(show_r, max_rows=max(10, topn), focus_anchor=_pending_focus_anchor)
 
 st.download_button(
     "⬇️ הורד CSV מסונן",
@@ -1128,8 +1483,181 @@ st.components.v1.html(
   }, INTERVAL_MS);
 })();
 
-// Status links intentionally use native same-tab navigation.
-// Streamlit handles ?set_status=...&v=... in the action router above.
+// Keep table position after status updates:
+// save current scroll before click/submit, restore after rerun.
+(() => {
+  const KEY = "job-agent-scroll-y";
+
+  function getTargetWindow() {
+    try {
+      if (window.parent && window.parent !== window) return window.parent;
+    } catch (e) {}
+    return window;
+  }
+
+  function getTargetDocument() {
+    try {
+      const w = getTargetWindow();
+      if (w && w.document) return w.document;
+    } catch (e) {}
+    return document;
+  }
+
+  function saveScroll() {
+    try {
+      const w = getTargetWindow();
+      const y = Math.max(w.scrollY || 0, w.pageYOffset || 0);
+      w.sessionStorage.setItem(KEY, String(y));
+    } catch (e) {}
+  }
+
+  function restoreScroll() {
+    try {
+      const w = getTargetWindow();
+      const raw = w.sessionStorage.getItem(KEY);
+      if (!raw) return;
+      const y = parseInt(raw, 10);
+      w.sessionStorage.removeItem(KEY);
+      if (Number.isNaN(y)) return;
+      const jump = () => {
+        w.scrollTo(0, y);
+        setTimeout(() => w.scrollTo(0, y), 80);
+        setTimeout(() => w.scrollTo(0, y), 260);
+      };
+      jump();
+    } catch (e) {}
+  }
+
+  function bindHandlers() {
+    const doc = getTargetDocument();
+
+    doc.querySelectorAll(".jobs-preview a.js-open-and-view").forEach((el) => {
+      if (el.dataset.viewSyncBound === "1") return;
+      el.dataset.viewSyncBound = "1";
+
+      const markViewedUi = () => {
+        const row = el.closest("tr");
+        if (!row) return;
+        const summary = row.querySelector(".status-summary");
+        if (summary) summary.textContent = "👁 נצפה";
+        row.querySelectorAll(".status-item").forEach((item) => {
+          const statusVal = (item.getAttribute("data-status-val") || "").trim();
+          if (statusVal === "👁") item.classList.add("active");
+          else item.classList.remove("active");
+        });
+        const viewCell = row.querySelector(".view-btn");
+        if (viewCell && viewCell.tagName && viewCell.tagName.toLowerCase() === "a") {
+          const done = doc.createElement("span");
+          done.className = "view-btn done";
+          done.textContent = "✓ נצפה";
+          viewCell.replaceWith(done);
+        }
+      };
+
+      el.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        saveScroll();
+        const w = getTargetWindow();
+        const openUrl = (el.getAttribute("href") || "").trim();
+        const statusUrl = (el.getAttribute("data-status-url") || "").trim();
+
+        // 1. Open job in new tab
+        if (openUrl && /^https?:\\/\\//i.test(openUrl)) {
+          try {
+            const opened = window.open(openUrl, "_blank", "noopener");
+            if (opened) {
+              try { opened.opener = null; } catch (e) {}
+            }
+          } catch (e) {}
+        }
+
+        // 2. Update UI immediately
+        markViewedUi();
+
+        // 3. Navigate current tab to status URL — query string only,
+        //    avoids wrong origin behavior from iframe context.
+        if (statusUrl) {
+          try {
+            let qs = statusUrl;
+            if (statusUrl.startsWith("http") || statusUrl.startsWith("//")) {
+              qs = new URL(statusUrl, w.location.href).search;
+            } else if (statusUrl.startsWith("?")) {
+              qs = statusUrl;
+            }
+            const base = w.location.href.split("?")[0].split("#")[0];
+            w.location.assign(base + qs);
+          } catch (e) {
+            try { w.location.assign(statusUrl); } catch (e2) {}
+          }
+        }
+      }, { capture: true });
+    });
+
+    doc.querySelectorAll(".jobs-preview a.status-item, .jobs-preview a.view-btn:not(.done)").forEach((el) => {
+      if (el.dataset.sameTabBound === "1") return;
+      el.dataset.sameTabBound = "1";
+      el.addEventListener("click", (ev) => {
+        const href = (el.getAttribute("href") || "").trim();
+        if (!href) return;
+        const w = getTargetWindow();
+        if (el.classList.contains("js-open-and-view")) return;
+        ev.preventDefault();
+        saveScroll();
+        try {
+          const nextUrl = new URL(href, w.location.href).toString();
+          w.location.assign(nextUrl);
+        } catch (e) {
+          try { w.location.assign(href); } catch (e2) {}
+        }
+      }, { capture: true });
+    });
+
+    doc.querySelectorAll(".jobs-preview .status-select").forEach((sel) => {
+      if (sel.dataset.statusSelectBound === "1") return;
+      sel.dataset.statusSelectBound = "1";
+      sel.addEventListener("change", () => {
+        saveScroll();
+        const form = sel.closest("form");
+        if (!form) return;
+        try { form.submit(); } catch (e) {}
+      });
+      sel.addEventListener("pointerdown", saveScroll, { capture: true });
+      sel.addEventListener("touchstart", saveScroll, { capture: true, passive: true });
+    });
+
+    const selector = [
+      "a.status-item",
+      ".jobs-preview .view-btn",
+      ".jobs-preview .biz-btn",
+      ".jobs-preview .status-btn",
+      ".jobs-preview a.job-link"
+    ].join(",");
+
+    doc.querySelectorAll(selector).forEach((el) => {
+      if (el.dataset.scrollBound === "1") return;
+      el.dataset.scrollBound = "1";
+      el.addEventListener("click", saveScroll, { capture: true });
+      el.addEventListener("pointerdown", saveScroll, { capture: true });
+      el.addEventListener("touchstart", saveScroll, { capture: true, passive: true });
+    });
+
+    doc.querySelectorAll(".jobs-preview form").forEach((form) => {
+      if (form.dataset.scrollBound === "1") return;
+      form.dataset.scrollBound = "1";
+      form.addEventListener("submit", saveScroll, { capture: true });
+    });
+  }
+
+  restoreScroll();
+  bindHandlers();
+
+  const doc = getTargetDocument();
+  const root = doc.body || doc.documentElement;
+  if (!root) return;
+  const observer = new MutationObserver(() => bindHandlers());
+  observer.observe(root, { childList: true, subtree: true });
+  setTimeout(() => observer.disconnect(), 15000);
+})();
 </script>
 """,
     height=0,
