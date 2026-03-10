@@ -381,7 +381,12 @@ def dedup_jobs(df):
 
 @st.cache_data
 def load_data(path="job_emails.csv"):
-    df = pd.read_csv(path)
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame()
     if "date" in df.columns:
         df["date_parsed"] = pd.to_datetime(df["date"], format="mixed", errors="coerce", utc=True)
     for col in ["it_score", "ops_score", "maint_score", "top_score", "cv_boost", "claude_match_pct"]:
