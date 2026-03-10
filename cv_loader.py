@@ -5,6 +5,7 @@ cv_loader.py – טוען קורות חיים מ-DOCX ו-PDF ומחזיר טוק
 כל מסלול יכול לכלול מספר קבצים (DOCX + PDF); הטוקנים מאוחדים (union).
 """
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -13,22 +14,24 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # ── תיקיית קורות חיים ────────────────────────────────────────────────
-_CV_DIR = r"c:\Users\shalo\OneDrive\Documents\OneDrive\Desktop\קורות חיים"
+# ניתן להגדיר CV_DIR כמשתנה סביבה; ברירת המחדל היא תת-תיקייה "cvs"
+# בספריית הפרויקט.  דוגמה ב-.env:  CV_DIR=C:\Users\me\Documents\cvs
+_CV_DIR = os.getenv("CV_DIR", str(Path(__file__).parent / "cvs"))
 
 # ── מיפוי מסלולים → קבצים (DOCX ו/או PDF) ───────────────────────────
 # כל ערך הוא רשימה של נתיבים; ניתן לשלב DOCX + PDF לאותו מסלול.
 # הטוקנים מכל הקבצים מאוחדים ← token-pool רחב יותר = boost יותר מדויק.
 CV_FILES: dict[str, list[str]] = {
     "IT": [
-        rf"{_CV_DIR}\שלום חכמון - קורות חיים - IT - מעודכן.docx",
-        rf"{_CV_DIR}\קורות חיים - IT.pdf",
+        str(Path(_CV_DIR) / "קורות חיים - IT.docx"),
+        str(Path(_CV_DIR) / "קורות חיים - IT.pdf"),
     ],
     "תפעול": [
-        rf"{_CV_DIR}\קורות חיים - כללי.docx",
-        rf"{_CV_DIR}\קורות חיים-תפעול.pdf",
+        str(Path(_CV_DIR) / "קורות חיים - תפעול.docx"),
+        str(Path(_CV_DIR) / "קורות חיים - תפעול.pdf"),
     ],
     "אחזקה": [
-        rf"{_CV_DIR}\שלום חכמון - אחזקה.docx",
+        str(Path(_CV_DIR) / "קורות חיים - אחזקה.docx"),
     ],
 }
 

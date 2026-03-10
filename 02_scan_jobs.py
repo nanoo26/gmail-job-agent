@@ -685,7 +685,7 @@ def recommend_cv(best_track: str) -> str:
         return "קורות חיים - IT"
     if best_track == "תפעול":
         return "קורות חיים - תפעול"
-    return "שלום חכמון - אחזקה"
+    return "קורות חיים - אחזקה"
 
 
 def _extract_gmail_msg_id(gmail_link: str) -> str:
