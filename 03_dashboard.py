@@ -298,6 +298,8 @@ def migrate_status_keys_to_current_df(status: dict, df: pd.DataFrame) -> tuple[d
     """Map legacy status keys to current canonical job_id values."""
     if not isinstance(status, dict):
         return {}, False
+    if not isinstance(df, pd.DataFrame) or "job_id" not in df.columns:
+        return dict(status), False
 
     alias_to_jobid: dict[str, str] = {}
     for jid in df["job_id"].astype(str).tolist():
@@ -389,13 +391,15 @@ def load_data(path="job_emails.csv"):
         {"encoding": "utf-8-sig", "engine": "python", "on_bad_lines": "skip"},
     ]
     last_err = ""
+    df = None
     for kwargs in read_attempts:
         try:
             df = pd.read_csv(path, **kwargs)
-            return df, ""
+            break
         except Exception as e:
             last_err = f"{type(e).__name__}: {e}"
-    return pd.DataFrame(), last_err or "unknown csv read error"
+    if df is None:
+        return pd.DataFrame(), last_err or "unknown csv read error"
     if "date" in df.columns:
         df["date_parsed"] = pd.to_datetime(df["date"], format="mixed", errors="coerce", utc=True)
     for col in ["it_score", "ops_score", "maint_score", "top_score", "cv_boost", "claude_match_pct"]:
@@ -414,7 +418,7 @@ def load_data(path="job_emails.csv"):
     df["display_subject"] = df.apply(
         lambda r: r["job_title"] if r["job_title"].strip() else r["subject"], axis=1)
     df["job_id"] = df.apply(build_job_id, axis=1)
-    return df
+    return df, ""
 
 
 df, _load_data_error = load_data()
