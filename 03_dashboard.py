@@ -3,6 +3,7 @@ import json
 import os
 import pathlib
 import re
+from datetime import datetime, timezone
 from html import escape, unescape
 from urllib.parse import urlencode, urlparse, urlunparse, parse_qs
 
@@ -18,6 +19,7 @@ STATUS_FILE    = str(pathlib.Path(__file__).parent / "job_status.json")
 BUSINESS_STATUS_FILE = str(pathlib.Path(__file__).parent / "job_business_status.json")
 PROFILE_FILE   = str(pathlib.Path(__file__).parent / "user_profile.json")
 RUN_SUMMARY_FILE = str(pathlib.Path(__file__).parent / "scan_run_summary.json")
+RUN_HISTORY_FILE = str(pathlib.Path(__file__).parent / "scan_run_history.jsonl")
 
 ENABLE_PERSONALIZATION = os.getenv("PERSONALIZATION", "0") == "1"
 if ENABLE_PERSONALIZATION:
@@ -97,6 +99,29 @@ def load_scan_run_summary(path: str = RUN_SUMMARY_FILE) -> dict | None:
             return data if isinstance(data, dict) else None
     except Exception:
         return None
+
+
+def load_scan_run_history(path: str = RUN_HISTORY_FILE, limit: int = 50) -> list[dict]:
+    if not os.path.exists(path):
+        return []
+    rows: list[dict] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    item = json.loads(raw)
+                    if isinstance(item, dict):
+                        rows.append(item)
+                except Exception:
+                    continue
+    except Exception:
+        return []
+    if limit > 0:
+        return rows[-limit:]
+    return rows
 
 
 # --- Dedup helpers ---
@@ -1231,64 +1256,229 @@ st.download_button(
 )
 
 st.divider()
-st.subheader("דוח Claude מההרצה האחרונה")
+st.subheader("סיכום סינון Claude על כל הנתונים")
+
+
+def _num_i(v, default: int = 0) -> int:
+    try:
+        return int(float(v))
+    except Exception:
+        return default
+
+
+def _num_f(v, default: float = 0.0) -> float:
+    try:
+        return float(v)
+    except Exception:
+        return default
+
+
+def _format_run_timestamp(ts_raw: str) -> tuple[str, datetime | None]:
+    ts_raw = str(ts_raw or "").strip()
+    if not ts_raw:
+        return "-", None
+    try:
+        dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S"), dt
+    except Exception:
+        return ts_raw, None
+
+
+def _short_text(v: str, limit: int = 140) -> str:
+    t = str(v or "").strip()
+    if len(t) <= limit:
+        return t
+    return t[: limit - 1].rstrip() + "…"
+
 
 run_summary = load_scan_run_summary()
-if not run_summary:
-    st.info("אין דוח הרצה זמין עדיין")
+_claude_threshold = st.slider("סף התאמה של Claude", 0, 100, 70, 5, key="claude_threshold_all")
+_show_rows = st.slider("כמה שורות להציג בכל טבלה", 5, 50, 15, 5, key="claude_rows_all")
+
+# Live snapshot based on all rows currently loaded from CSV.
+_claude_view = df.copy()
+_claude_view["_claude_pct"] = pd.to_numeric(
+    _claude_view.get("claude_match_pct", 0), errors="coerce"
+).fillna(0).astype(int)
+_claude_view["_track"] = _claude_view.get("best_track", "לא מסווג").fillna("לא מסווג").astype(str)
+_claude_view["_title"] = _claude_view.apply(
+    lambda r: str(r.get("job_title", "")).strip() or str(r.get("subject", "")).strip(), axis=1
+)
+_claude_view["_status"] = _claude_view["job_id"].map(
+    lambda jid: st.session_state.job_status.get(jid, "🆕")
+)
+
+_track_options = ["הכל"] + sorted([t for t in _claude_view["_track"].dropna().unique().tolist() if str(t).strip()])
+_selected_track = st.selectbox("מתג מסלול בדוח Claude", options=_track_options, index=0, key="claude_track_filter")
+_claude_scope = _claude_view if _selected_track == "הכל" else _claude_view[_claude_view["_track"] == _selected_track]
+if _selected_track != "הכל":
+    st.caption(f"מוצגים מדדים וטבלאות למסלול: {_selected_track}")
+
+_total_rows = int(len(_claude_scope))
+_analyzed_mask = _claude_scope["_claude_pct"] > 0
+_pass_mask = _claude_scope["_claude_pct"] >= _claude_threshold
+_fail_mask = (_claude_scope["_claude_pct"] > 0) & (_claude_scope["_claude_pct"] < _claude_threshold)
+_not_analyzed_mask = _claude_scope["_claude_pct"] <= 0
+
+_analyzed_count = int(_analyzed_mask.sum())
+_pass_count = int(_pass_mask.sum())
+_fail_count = int(_fail_mask.sum())
+_not_analyzed_count = int(_not_analyzed_mask.sum())
+_pass_rate = round((_pass_count / _analyzed_count) * 100, 1) if _analyzed_count else 0.0
+_fail_rate = round((_fail_count / _analyzed_count) * 100, 1) if _analyzed_count else 0.0
+_avg_pct = round(float(_claude_scope["_claude_pct"].mean()), 2) if _total_rows else 0.0
+_max_pct = int(_claude_scope["_claude_pct"].max()) if _total_rows else 0
+
+m1, m2, m3, m4, m5 = st.columns(5)
+m1.metric("כל השורות בקובץ", _total_rows)
+m2.metric("נותחו ע״י Claude", _analyzed_count)
+m3.metric("עברו סף", _pass_count, delta=f"{_pass_rate}% מהמנותחות")
+m4.metric("מתחת לסף", _fail_count, delta=f"{_fail_rate}% מהמנותחות")
+m5.metric("לא נותחו", _not_analyzed_count)
+
+n1, n2 = st.columns(2)
+n1.metric("ממוצע Claude בקובץ", f"{_avg_pct}%")
+n2.metric("מקסימום Claude בקובץ", f"{_max_pct}%")
+
+st.info(
+    "כך לקרוא את זה בפשטות: "
+    "Claude ניתח את השורות עם ציון > 0. "
+    f"השורות שעברו את הסף הן אלו עם ציון >= {_claude_threshold}%."
+)
+
+# Per-track breakdown so tracks like 'תפעול' are always visible.
+_track_rows = []
+for _track, _g in _claude_view.groupby("_track", dropna=False):
+    _track_total = int(len(_g))
+    _track_an = int((_g["_claude_pct"] > 0).sum())
+    _track_pass = int((_g["_claude_pct"] >= _claude_threshold).sum())
+    _track_fail = int(((_g["_claude_pct"] > 0) & (_g["_claude_pct"] < _claude_threshold)).sum())
+    _track_avg = round(float(_g["_claude_pct"].mean()), 2) if _track_total else 0.0
+    _track_max = int(_g["_claude_pct"].max()) if _track_total else 0
+    _track_pass_rate = round((_track_pass / _track_an) * 100, 1) if _track_an else 0.0
+    _track_rows.append(
+        {
+            "מסלול": _track,
+            "סה״כ שורות": _track_total,
+            "נותחו": _track_an,
+            "עברו סף": _track_pass,
+            "מתחת לסף": _track_fail,
+            "שיעור מעבר": f"{_track_pass_rate}%",
+            "ממוצע %": _track_avg,
+            "מקסימום %": _track_max,
+        }
+    )
+
+st.markdown("#### פילוח לפי מסלול (כולל תפעול)")
+if _track_rows:
+    _track_df = pd.DataFrame(_track_rows).sort_values(
+        ["עברו סף", "נותחו", "סה״כ שורות"], ascending=False
+    )
+    st.dataframe(_track_df, use_container_width=True, hide_index=True)
 else:
-    run_ts = str(run_summary.get("run_timestamp", "")).strip()
-    if run_ts:
-        st.caption(f"זמן הרצה: {run_ts}")
+    st.caption("אין נתונים להצגה בפילוח מסלולים.")
 
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("קריאות Claude", int(run_summary.get("claude_calls_attempted", 0) or 0))
-    m2.metric("הצלחות", int(run_summary.get("claude_success_count", 0) or 0))
-    m3.metric("שגיאות", int(run_summary.get("claude_error_count", 0) or 0))
-    m4.metric("התאמות חיוביות", int(run_summary.get("claude_positive_count", 0) or 0))
-    avg_pct = run_summary.get("claude_avg_match_pct", 0)
-    max_pct = int(run_summary.get("claude_max_match_pct", 0) or 0)
-    m5.metric("ממוצע / מקסימום", f"{avg_pct}% / {max_pct}%")
+# Explain exactly which rows passed/failed the Claude filter.
+_base_cols = ["_title", "_track", "_claude_pct", "final_score", "_status", "claude_analysis", "claude_error"]
+_base_cols = [c for c in _base_cols if c in _claude_scope.columns]
 
-    d1, d2, d3 = st.columns(3)
-    d1.metric("התאמות Claude ב-CSV", int(run_summary.get("dataset_positive_count", 0) or 0))
-    d2.metric("ממוצע ב-CSV", f"{run_summary.get('dataset_avg_match_pct', 0)}%")
-    d3.metric("מקסימום ב-CSV", f"{int(run_summary.get('dataset_max_match_pct', 0) or 0)}%")
+_passed_df = (
+    _claude_scope[_pass_mask]
+    .sort_values(["_claude_pct", "final_score"], ascending=[False, False])
+    .drop_duplicates(subset=["job_id"], keep="first")
+)
+_failed_df = (
+    _claude_scope[_fail_mask]
+    .sort_values(["_claude_pct", "final_score"], ascending=[True, False])
+    .drop_duplicates(subset=["job_id"], keep="first")
+)
 
-    top_rows = run_summary.get("top_5_claude_rows", [])
-    if not top_rows:
-        # Backward-compatible fallback when old summary files lack top rows.
-        _tmp = df.copy()
-        _tmp["_cm"] = pd.to_numeric(_tmp.get("claude_match_pct", 0), errors="coerce").fillna(0).astype(int)
-        _tmp = _tmp.sort_values(["_cm", "final_score"], ascending=[False, False]).drop_duplicates(
-            subset=["job_id"], keep="first"
+left_tbl, right_tbl = st.columns(2)
+with left_tbl:
+    st.markdown(f"#### עברו את הסינון (Top {_show_rows})")
+    if len(_passed_df) > 0:
+        _p = _passed_df[_base_cols].head(_show_rows).copy()
+        _p["הסבר קצר"] = _p["_claude_pct"].map(lambda v: f"עבר סף {_claude_threshold}% עם {int(v)}%")
+        _p["הסבר Claude"] = _p["claude_analysis"].map(lambda t: _short_text(t, 120))
+        _p = _p.rename(
+            columns={
+                "_title": "משרה",
+                "_track": "מסלול",
+                "_claude_pct": "% התאמה",
+                "final_score": "ציון סופי",
+                "_status": "סטטוס",
+            }
         )
-        top_rows = []
-        for _, rr in _tmp.head(5).iterrows():
-            top_rows.append(
-                {
-                    "title": str(rr.get("job_title") or rr.get("subject", ""))[:180],
-                    "match_pct": int(rr.get("_cm", 0) or 0),
-                    "track": str(rr.get("claude_cv_track") or rr.get("best_track", "")),
-                    "error": str(rr.get("claude_error", "") or "")[:120],
-                }
-            )
-
-    if isinstance(top_rows, list) and top_rows:
-        top_df = pd.DataFrame(top_rows)
-        col_order = [c for c in ["title", "match_pct", "track", "error"] if c in top_df.columns]
-        if col_order:
-            top_df = top_df[col_order].rename(
-                columns={
-                    "title": "משרה",
-                    "match_pct": "% התאמה",
-                    "track": "מסלול",
-                    "error": "שגיאה",
-                }
-            )
-        st.dataframe(top_df, use_container_width=True, hide_index=True)
+        _p_cols = [c for c in ["משרה", "מסלול", "% התאמה", "ציון סופי", "סטטוס", "הסבר קצר", "הסבר Claude"] if c in _p.columns]
+        st.dataframe(_p[_p_cols], use_container_width=True, hide_index=True)
     else:
-        st.caption("אין שורות Claude להצגה בדוח האחרון")
+        st.caption("אין שורות שעברו את הסף כרגע.")
+
+with right_tbl:
+    st.markdown(f"#### נפסלו ע״י הסינון (Top {_show_rows})")
+    if len(_failed_df) > 0:
+        _f = _failed_df[_base_cols].head(_show_rows).copy()
+        _f["הסבר קצר"] = _f["_claude_pct"].map(lambda v: f"מתחת לסף {_claude_threshold}% ({int(v)}%)")
+        _f["סיבת שגיאה"] = _f["claude_error"].map(lambda t: _short_text(t, 90))
+        _f["הסבר Claude"] = _f["claude_analysis"].map(lambda t: _short_text(t, 120))
+        _f = _f.rename(
+            columns={
+                "_title": "משרה",
+                "_track": "מסלול",
+                "_claude_pct": "% התאמה",
+                "final_score": "ציון סופי",
+                "_status": "סטטוס",
+            }
+        )
+        _f_cols = [c for c in ["משרה", "מסלול", "% התאמה", "ציון סופי", "סטטוס", "הסבר קצר", "סיבת שגיאה", "הסבר Claude"] if c in _f.columns]
+        st.dataframe(_f[_f_cols], use_container_width=True, hide_index=True)
+    else:
+        st.caption("אין שורות שנפסלו לפי הסף כרגע.")
+
+with st.expander("פרטי ההרצה האחרונה (טכני)", expanded=False):
+    if not run_summary:
+        st.caption("אין scan_run_summary.json. הנתונים למעלה מבוססים ישירות על ה-CSV.")
+    else:
+        _run_ts_text, _run_dt = _format_run_timestamp(run_summary.get("run_timestamp", ""))
+        st.caption(f"זמן הרצה אחרונה: {_run_ts_text}")
+        _scanned = _num_i(run_summary.get("scanned_emails", 0))
+        _skipped = _num_i(run_summary.get("skipped_existing", 0))
+        _attempted = _num_i(run_summary.get("claude_calls_attempted", 0))
+        _success = _num_i(run_summary.get("claude_success_count", 0))
+        _errors = _num_i(run_summary.get("claude_error_count", 0))
+        _positive = _num_i(run_summary.get("claude_positive_count", 0))
+        t1, t2, t3, t4, t5 = st.columns(5)
+        t1.metric("נסרקו במייל", _scanned)
+        t2.metric("דולגו קיימות", _skipped)
+        t3.metric("קריאות Claude בהרצה", _attempted)
+        t4.metric("הצלחות בהרצה", _success)
+        t5.metric("שגיאות בהרצה", _errors)
+        st.caption(f"התאמות חיוביות בהרצה: {_positive}")
+        st.caption(
+            f"מצב סריקה: {run_summary.get('scan_mode', '-')}, "
+            f"SCAN_ONLY_NEW={'1' if str(run_summary.get('scan_mode', '')) == 'only_new' else '0'}"
+        )
+
+    _history = load_scan_run_history(limit=30)
+    if _history:
+        _hist_rows = []
+        for h in reversed(_history):
+            _ts_txt, _ = _format_run_timestamp(h.get("run_timestamp", ""))
+            _hist_rows.append(
+                {
+                    "זמן": _ts_txt,
+                    "מצב": str(h.get("scan_mode", "-")),
+                    "נסרקו": _num_i(h.get("scanned_emails", 0)),
+                    "קריאות Claude": _num_i(h.get("claude_calls_attempted", 0)),
+                    "הצלחות": _num_i(h.get("claude_success_count", 0)),
+                    "שגיאות": _num_i(h.get("claude_error_count", 0)),
+                    "שורות בקובץ": _num_i(h.get("total_exported_rows", 0)),
+                }
+            )
+        st.markdown("##### היסטוריית סריקות (30 אחרונות)")
+        st.dataframe(pd.DataFrame(_hist_rows), use_container_width=True, hide_index=True)
 
 # ---------------------------------------------------------------------------
 # JS block: CSS injection for ag-Grid theme.

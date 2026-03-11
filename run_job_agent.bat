@@ -56,10 +56,13 @@ echo Note: Claude API key will be resolved by Python ^(.env file or system env v
 
 REM ---- Run unified scan ----
 set "SCAN_FAILED=0"
-set "SCAN_LIMIT=100"
-set "SCAN_FROM_YEAR_START=1"
-set "CLAUDE_DEBUG_STOP_EARLY=0"
-set "CLAUDE_MAX_PER_RUN=100"
+if not defined SCAN_ONLY_NEW set "SCAN_ONLY_NEW=1"
+if not defined SCAN_LIMIT set "SCAN_LIMIT=100"
+if not defined SCAN_MAX_RESULTS set "SCAN_MAX_RESULTS=160"
+if not defined SCAN_FROM_YEAR_START set "SCAN_FROM_YEAR_START=1"
+if not defined CLAUDE_DEBUG_STOP_EARLY set "CLAUDE_DEBUG_STOP_EARLY=0"
+if not defined CLAUDE_MAX_PER_RUN set "CLAUDE_MAX_PER_RUN=100"
+echo Scan mode: SCAN_ONLY_NEW=%SCAN_ONLY_NEW% ^| SCAN_LIMIT=%SCAN_LIMIT% ^| SCAN_MAX_RESULTS=%SCAN_MAX_RESULTS% ^| CLAUDE_MAX_PER_RUN=%CLAUDE_MAX_PER_RUN%
 echo Running email scan...
 "%PYTHON_EXE%" 02_scan_jobs.py
 if errorlevel 1 (

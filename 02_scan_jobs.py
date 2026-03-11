@@ -60,6 +60,7 @@ _SCAN_DEBUG_LIMIT = _env_int("SCAN_DEBUG_LIMIT", 20)
 _SCAN_FETCH_BUFFER = _env_int("SCAN_FETCH_BUFFER", 80)
 _SCAN_DAYS_BACK = _env_int("SCAN_DAYS_BACK", 90)
 _SCAN_FROM_YEAR_START = _env_flag("SCAN_FROM_YEAR_START", False)
+_SCAN_MAX_RESULTS = _env_int("SCAN_MAX_RESULTS", 160)
 if _ANTHROPIC_API_KEY:
     try:
         import anthropic as _anthropic_mod
@@ -755,6 +756,33 @@ def _top_claude_rows_unique(rows: list[dict], limit: int = 5) -> list[dict]:
     return top_rows
 
 
+def _fetch_messages_paginated(service, query: str, fetch_limit: int | None) -> list[dict]:
+    """Fetch Gmail messages with pagination up to fetch_limit (or all when None)."""
+    messages: list[dict] = []
+    page_token: str | None = None
+    while True:
+        page_size = 500
+        if fetch_limit is not None:
+            remaining = fetch_limit - len(messages)
+            if remaining <= 0:
+                break
+            page_size = min(page_size, remaining)
+
+        req = service.users().messages().list(
+            userId="me",
+            q=query,
+            maxResults=page_size,
+            pageToken=page_token,
+        )
+        res = req.execute()
+        batch = res.get("messages", []) or []
+        messages.extend(batch)
+        page_token = res.get("nextPageToken")
+        if not page_token:
+            break
+    return messages
+
+
 
 def main(days_back=90, max_results=120, only_inbox=True):
     out_file = "job_emails.csv"
@@ -794,15 +822,16 @@ def main(days_back=90, max_results=120, only_inbox=True):
 
     scan_limit = _SCAN_LIMIT if _SCAN_LIMIT is not None else max_results
     if _SCAN_DEBUG_MODE and _SCAN_DEBUG_LIMIT is not None:
-        scan_limit = min(scan_limit, _SCAN_DEBUG_LIMIT)
+        scan_limit = _SCAN_DEBUG_LIMIT if scan_limit is None else min(scan_limit, _SCAN_DEBUG_LIMIT)
 
     fetch_limit = max_results
-    if scan_limit is not None and scan_limit < max_results:
+    if scan_limit is not None:
         buffer = _SCAN_FETCH_BUFFER or 0
-        fetch_limit = min(max_results, max(scan_limit, scan_limit + buffer))
+        required = max(scan_limit, scan_limit + buffer)
+        fetch_limit = required if fetch_limit is None else min(fetch_limit, required)
 
-    res = service.users().messages().list(userId="me", q=query, maxResults=fetch_limit).execute()
-    msgs = res.get("messages", [])
+    msgs = _fetch_messages_paginated(service, query, fetch_limit)
+    print(f"[scan] fetched {len(msgs)} candidate emails (fetch_limit={fetch_limit or 'ALL'})")
 
     new_rows = []
     scanned_emails = 0
@@ -1013,6 +1042,12 @@ def main(days_back=90, max_results=120, only_inbox=True):
 
     summary_payload = {
         "run_timestamp": datetime.now(timezone.utc).isoformat(),
+        "scan_mode": "only_new" if _SCAN_ONLY_NEW else "full",
+        "scan_days_back": days_back,
+        "scan_limit": scan_limit,
+        "scan_fetch_limit": fetch_limit,
+        "scan_max_results": max_results,
+        "claude_max_per_run": _CLAUDE_MAX_PER_RUN,
         "scanned_emails": scanned_emails,
         "skipped_existing": skipped_existing,
         "total_exported_rows": len(rows),
@@ -1043,6 +1078,14 @@ def main(days_back=90, max_results=120, only_inbox=True):
     except Exception as e:
         print(f"[scan] warning: could not write scan_run_summary.json: {e}")
 
+    # Append per-run history for longitudinal tracking.
+    history_file = os.path.join(os.path.dirname(__file__), "scan_run_history.jsonl")
+    try:
+        with open(history_file, "a", encoding="utf-8") as hf:
+            hf.write(json.dumps(summary_payload, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[scan] warning: could not append scan_run_history.jsonl: {e}")
+
 
 if __name__ == "__main__":
     run_days_back = _SCAN_DAYS_BACK if _SCAN_DAYS_BACK is not None else 90
@@ -1053,7 +1096,7 @@ if __name__ == "__main__":
         print(f"[scan] using start-of-year window ({now_utc.year}): {run_days_back} days back")
     else:
         print(f"[scan] using window: {run_days_back} days back")
-    main(days_back=run_days_back, max_results=160, only_inbox=True)
+    main(days_back=run_days_back, max_results=_SCAN_MAX_RESULTS, only_inbox=True)
 
 
 
